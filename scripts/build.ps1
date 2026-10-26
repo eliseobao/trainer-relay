@@ -21,7 +21,9 @@ Run-Python -m PyInstaller --clean --noconfirm --onefile --windowed --name Traine
 $Bundle = "release\TrainerRelay-$Version-windows-x64"
 New-Item -ItemType Directory -Force $Bundle | Out-Null
 Copy-Item dist\TrainerRelay.exe $Bundle
-Copy-Item README.md,LICENSE,CHANGELOG.md,THIRD_PARTY_NOTICES.md $Bundle
+Copy-Item README.md,LICENSE,CHANGELOG.md,CONTRIBUTING.md,THIRD_PARTY_NOTICES.md $Bundle
+New-Item -ItemType Directory -Force "$Bundle\assets" | Out-Null
+Copy-Item assets\app.png "$Bundle\assets"
 Copy-Item docs "$Bundle\docs" -Recurse -Force
 Run-Python scripts/notices.py "$Bundle\THIRD_PARTY_NOTICES.txt"
 $Zip = "$Bundle.zip"

@@ -13,6 +13,15 @@ class Telemetry:
     updated: float = 0
 
 
+@dataclass(frozen=True)
+class ControlRequest:
+    page: int
+    mode: str
+    value: float | None = None
+    rolling: float | None = None
+    wind: tuple[float, float, float] | None = None  # m/s, coefficient, drafting factor
+
+
 def indoor_bike(data, state):
     flags = struct.unpack_from("<H", data)[0]
     offset = 2
@@ -95,8 +104,9 @@ class Frames:
 
 
 class Fec:
-    def __init__(self, device_id=53001):
+    def __init__(self, device_id=53001, capabilities=2):
         self.device_id = device_id
+        self.capabilities = capabilities
         self.count = self.event = self.accumulated = 0
         self.started = self.last = time.monotonic()
         self.distance = 0.0
@@ -114,7 +124,7 @@ class Fec:
 
     def common(self, page):
         if page == 54:
-            return struct.pack("<B4BHB", 54, 255, 255, 255, 255, 0xFFFF, 2)  # ERG supported
+            return struct.pack("<B4BHB", 54, 255, 255, 255, 255, 0xFFFF, self.capabilities)
         if page == 71:
             return self.status
         if page == 80:
@@ -130,13 +140,38 @@ class Fec:
             reply = self.common(data[6])
             if reply:
                 self.pending.extend([reply] * min(10, max(1, data[5] & 0x7F)))
-        elif page == 49:
-            raw = struct.unpack_from("<H", data, 6)[0]
-            self.command_status(page, 4 if raw != 0xFFFF else 3, data)
-            if raw != 0xFFFF:
-                return raw / 4
-        elif page in (48, 50, 51, 55):
-            self.command_status(page, 2, data)  # unsupported rather than false success
+        elif page in (48, 49, 50, 51):
+            required = {48: 1, 49: 2, 50: 4, 51: 4}[page]
+            if not self.capabilities & required:
+                self.command_status(page, 2, data)
+                return None
+            request = None
+            if page == 49:
+                raw = struct.unpack_from("<H", data, 6)[0]
+                if raw != 0xFFFF:
+                    request = ControlRequest(page, "erg", raw / 4)
+            elif page == 48:
+                if data[7] <= 200:
+                    request = ControlRequest(page, "resistance", data[7] / 2)
+            elif page == 51:
+                raw = struct.unpack_from("<H", data, 5)[0]
+                if raw <= 40000 or raw == 0xFFFF:
+                    grade = None if raw == 0xFFFF else raw / 100 - 200
+                    rolling = 0.004 if data[7] == 255 else data[7] * 0.00005
+                    request = ControlRequest(page, "simulation", grade, rolling)
+            else:
+                coefficient = 0.51 if data[5] == 255 else data[5] * 0.01
+                speed = 0 if data[6] == 255 else (data[6] - 127) / 3.6
+                drafting = 1 if data[7] == 255 else data[7] * 0.01
+                if 0 <= drafting <= 1:
+                    request = ControlRequest(
+                        page, "simulation", wind=(speed, coefficient, drafting)
+                    )
+            self.command_status(page, 4 if request else 3, data)
+            return request
+        elif page == 55:
+            self.command_status(page, 2, data)  # User mass/configuration has no FTMS mapping here.
+
         return None
 
     def next_page(self, state):

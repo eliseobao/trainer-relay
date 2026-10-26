@@ -41,6 +41,7 @@ class BridgeWindow:
         self.error = ""
         self.sample_at = 0
         self.sample_age = 0
+        self.connection_detail = ""
         self.after_id = None
         self.links = {}
         self.values = {}
@@ -55,7 +56,7 @@ class BridgeWindow:
                 ("computer", "Signal received"),
             ]:
                 self.link(name, value)
-            self.values["target"].set("200")
+            self.handle(("target", 1.5, "Slope", "%"))
             self.values["power"].set("198")
             self.values["speed"].set("31.2")
             self.state(
@@ -172,7 +173,7 @@ class BridgeWindow:
         metrics.pack(fill="x")
         for i, (key, title, unit) in enumerate(
             [
-                ("target", "ERG TARGET", "W"),
+                ("target", "CONTROL TARGET", ""),
                 ("power", "TRAINER POWER", "W"),
                 ("speed", "SPEED", "km/h"),
                 ("cadence", "TRAINER CADENCE", "rpm"),
@@ -181,15 +182,19 @@ class BridgeWindow:
             metrics.columnconfigure(i, weight=1, uniform="metrics")
             card = self.card(metrics)
             card.grid(row=0, column=i, sticky="nsew", padx=(0, 8) if i < 3 else 0)
-            self.label(card, title, 8, color=MUTED, bold=True).pack(
-                anchor="w", padx=12, pady=(10, 1)
-            )
+            title_label = self.label(card, title, 8, color=MUTED, bold=True)
+            title_label.pack(anchor="w", padx=12, pady=(10, 1))
+            if key == "target":
+                self.target_heading = title_label
             value = tk.StringVar(value="—")
             self.values[key] = value
             widget = self.label(card, size=27, color=BLUE if key == "target" else INK, bold=True)
             widget.configure(textvariable=value)
             widget.pack(anchor="w", padx=12)
-            self.label(card, unit, 9, color=MUTED).pack(anchor="w", padx=12, pady=(0, 10))
+            unit_label = self.label(card, unit, 9, color=MUTED)
+            unit_label.pack(anchor="w", padx=12, pady=(0, 10))
+            if key == "target":
+                self.target_unit = unit_label
         self.label(
             panel,
             "Trainer readings only · Crank power and cadence paired to your cycling computer are separate.",
@@ -209,13 +214,15 @@ class BridgeWindow:
         ).pack(anchor="w", padx=14)
         self.label(
             pairing,
-            "Keep the bridge running during ERG workouts. Slope and resistance modes are not supported.",
+            "Keep the app running while riding. Your cycling computer selects the control mode.",
             9,
             color=MUTED,
         ).pack(anchor="w", padx=14, pady=(4, 10))
         footer = tk.Frame(panel, bg=BG)
         footer.pack(fill="x", side="bottom", pady=(8, 0))
-        self.event_text = tk.StringVar(value="ERG control · Local connections · No account needed")
+        self.event_text = tk.StringVar(
+            value="Trainer control · Local connections · No account needed"
+        )
         self.label(
             footer,
             color=MUTED,
@@ -296,6 +303,8 @@ class BridgeWindow:
         for variable in self.values.values():
             variable.set("—")
         self.sample_at = 0
+        self.target_heading.configure(text="CONTROL TARGET")
+        self.target_unit.configure(text="")
         self.link("computer", "No signal yet")
         self.state("Connecting…", "Opening the Bluetooth trainer and ANT+ dongle.")
         self.launch(
@@ -328,15 +337,26 @@ class BridgeWindow:
             self.link(message[1], message[2])
         elif kind == "ready":
             self.connected = True
-            self.state(
-                "Bridge running",
-                f"Pair ANT+ trainer {message[1]} on your cycling computer. ERG range: {message[2]}–{message[3]} W.",
-                GREEN,
-            )
-            self.activity("Waiting for a power target from your cycling computer.")
+            self.connection_detail = f"ANT+ trainer {message[1]} · {message[2]}"
+            self.state("Bridge running", self.connection_detail, GREEN)
+            self.activity("Waiting for a target from your cycling computer.")
         elif kind == "target":
-            self.values["target"].set(str(message[1]))
-            self.activity(f"{time.strftime('%H:%M:%S')} · Trainer accepted {message[1]} W")
+            mode, unit = message[2:] if len(message) > 2 else ("ERG", "W")
+            self.values["target"].set(f"{message[1]:g}")
+            self.target_heading.configure(text=f"{mode.upper()} TARGET")
+            self.target_unit.configure(text=unit)
+            if self.connected:
+                self.state("Bridge running", self.connection_detail, GREEN)
+            self.activity(
+                f"{time.strftime('%H:%M:%S')} · Trainer accepted {mode.lower()} {message[1]:g}{unit if unit == '%' else ' ' + unit}"
+            )
+        elif kind == "settings":
+            self.activity(message[1])
+        elif kind == "command_error":
+            self.error = message[1]
+            self.state("Target not applied", self.error, RED)
+            self.copy_button.configure(state="normal")
+            self.activity("Bridge is still running. The last accepted target remains shown.")
         elif kind == "devices":
             self.devices = message[1]
             self.combo["values"] = [f"{name}  ·  {address}" for name, address in self.devices]
@@ -366,6 +386,8 @@ class BridgeWindow:
             if message[1] == "bridge":
                 self.connected = False
                 self.sample_at = 0
+                self.target_heading.configure(text="CONTROL TARGET")
+                self.target_unit.configure(text="")
                 for name, value in [
                     ("bluetooth", "Not connected"),
                     ("ant", "Not broadcasting"),

@@ -34,7 +34,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(self.window.combo.get(), "")
 
     def test_ready_does_not_claim_computer_is_connected(self):
-        self.window.handle(("ready", 53001, 50, 600))
+        self.window.handle(("ready", 53001, "ERG 50–600 W · Slope · Resistance"))
         self.assertEqual(self.window.links["computer"][0].get(), "No signal yet")
         self.window.handle(("link", "computer", "Signal received"))
         self.assertEqual(self.window.links["computer"][0].get(), "Signal received")
@@ -69,6 +69,23 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(self.window.values["target"].get(), "—")
         self.assertEqual(self.window.links["ant"][0].get(), "Not broadcasting")
         self.assertEqual(self.window.status_title.cget("text"), "Bridge stopped")
+
+    def test_target_units_follow_control_mode(self):
+        for value, mode, unit in [(200, "ERG", "W"), (1.5, "Slope", "%"), (25, "Resistance", "%")]:
+            self.window.handle(("target", value, mode, unit))
+            self.assertEqual(self.window.target_heading.cget("text"), f"{mode.upper()} TARGET")
+            self.assertEqual(self.window.target_unit.cget("text"), unit)
+            self.assertEqual(self.window.values["target"].get(), f"{value:g}")
+
+    def test_rejection_keeps_last_accepted_target_and_next_target_recovers(self):
+        self.window.handle(("ready", 53001, "ERG · Slope · Resistance"))
+        self.window.handle(("target", 1, "Slope", "%"))
+        self.window.handle(("command_error", "Resistance rejected"))
+        self.assertTrue(self.window.connected)
+        self.assertEqual(self.window.values["target"].get(), "1")
+        self.assertEqual(self.window.status_title.cget("text"), "Target not applied")
+        self.window.handle(("target", 150, "ERG", "W"))
+        self.assertEqual(self.window.status_title.cget("text"), "Bridge running")
 
 
 if __name__ == "__main__":

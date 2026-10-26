@@ -40,7 +40,7 @@ class ProtocolTests(unittest.TestCase):
     def test_garmin_target_quarter_watts_and_ack(self):
         fec = Fec()
         target = bytes([49]) + b"\xff" * 5 + struct.pack("<H", 800)
-        self.assertEqual(fec.receive(target), 200)
+        self.assertEqual(fec.receive(target).value, 200)
         self.assertEqual(fec.status[:4], bytes([71, 49, 0, 4]))
         fec.result(0)
         self.assertEqual(fec.common(71), bytes([71, 49, 0, 0]) + target[4:8])

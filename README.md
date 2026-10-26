@@ -1,87 +1,59 @@
-# TrainerRelay
+<div align="center">
+  <img src="assets/app.png" width="72" alt="TrainerRelay logo">
+  <h1>TrainerRelay</h1>
+  <p>A small Windows bridge between your Bluetooth trainer and ANT+ cycling computer.</p>
 
-**Use a Bluetooth trainer with an ANT+ cycling computer.**
+  [![Build](https://github.com/eliseobao/trainer-relay/actions/workflows/windows.yml/badge.svg)](https://github.com/eliseobao/trainer-relay/actions/workflows/windows.yml)
+  [![Windows x64](https://img.shields.io/badge/Windows-x64-176B82)](https://github.com/eliseobao/trainer-relay/releases)
+  [![MIT license](https://img.shields.io/badge/license-MIT-197454)](LICENSE)
 
-TrainerRelay is a small Windows bridge for ERG workouts. It connects to a Bluetooth FTMS trainer, broadcasts an ANT+ FE-C trainer through a USB dongle, and relays power targets from your cycling computer. No account, cloud service, or workout library.
+  **[Download for Windows](https://github.com/eliseobao/trainer-relay/releases)** · **[Setup & help](docs/guide.md)** · **[What's new](CHANGELOG.md)**
+</div>
 
-![TrainerRelay interface, displaying sample data](docs/interface.png)
+<br>
+
+![TrainerRelay, showing sample readings](docs/interface.png)
+
+Your cycling computer runs the ride. TrainerRelay passes its targets to the trainer and sends the trainer's readings back. No account, cloud connection, or workout dashboard.
 
 ```text
-Cycling computer  ── ANT+ power target ──▶  TrainerRelay  ── Bluetooth ERG ──▶  Trainer
-                 ◀── power and speed ──                 ◀── measurements ──
+Cycling computer  ⇄  ANT+ USB stick + TrainerRelay  ⇄  Bluetooth trainer
 ```
 
-## Get started
+## Ready to ride
 
-Download the Windows x64 ZIP from [Releases](https://github.com/eliseobao/trainer-relay/releases). Extract the entire ZIP and open **TrainerRelay.exe**. Python is bundled; a compatible ANT USB driver must already be installed. The executable is unsigned.
+1. Extract the Windows ZIP and open **TrainerRelay.exe**.
+2. Plug in the ANT+ stick, wake your trainer, and close other apps using it.
+3. **Scan → select your trainer → Start bridge.**
+4. On your cycling computer, pair indoor trainer **53001**. Keep it near the USB stick while pairing.
+5. Start your ride. Leave TrainerRelay running and the laptop awake.
 
-1. Plug in your ANT+ dongle and wake the trainer. Close other apps using either device.
-2. Click **Scan**, select your trainer, then **Start bridge**.
-3. On your cycling computer, open its indoor-trainer pairing menu and select **53001**. Keep the computer near the USB dongle during pairing. See [device-specific setup](docs/compatibility.md#priority-tested-setup) for the D100 and Edge 530.
-4. Start an indoor ERG workout on the cycling computer. TrainerRelay shows each accepted power target and the trainer's live readings.
-5. Leave the app running and the laptop awake. Click **Stop** before unplugging the dongle.
+**You need:** Windows x64 with Bluetooth LE, an FTMS trainer, a supported ANT USB stick with the libusb-win32 driver, and a cycling computer with ANT+ FE-C trainer control. Python is included in the download. The app is unsigned.
 
-The cycling computer should remember trainer **53001** for subsequent sessions. Start TrainerRelay each time you ride.
+The **D100 + Edge 530** is the priority setup. [Driver setup and Edge pairing](docs/guide.md) are explained in the guide.
 
-## What you need
+## Three ways to ride
 
-| Component | Requirement | Tested |
+| Mode | What the cycling computer sends | Status |
 | --- | --- | --- |
-| Computer | Windows x64 with Bluetooth LE; release built with Python 3.13 | Windows 11 |
-| Trainer | Bluetooth FTMS, Indoor Bike Data, target-power control | Van Rysel D100 |
-| ANT dongle | USB ID `0fcf:1008` or `0fcf:1009`, libusb-win32 driver | ANT USB Stick 2 (`1008`) |
-| Cycling computer | ANT+ FE-C trainer control | Garmin Edge 530 |
+| **ERG** | A power target, such as 200 W | Verified on the D100 + Edge 530 |
+| **Slope** | Grade, wind, and rolling resistance | Implemented; hardware test pending |
+| **Resistance** | A level from 0–100% | Implemented; hardware test pending |
 
-Other compatible hardware may work; it has not been verified. macOS, Linux, WinUSB-only dongles, and vendor-specific trainer protocols are outside this release's supported scope. See [compatibility](docs/compatibility.md) and [USB setup and troubleshooting](docs/troubleshooting.md).
+The **0.2 preview** adds slope and resistance. It reads the trainer's features before enabling them; resistance also needs a usable native range. These new modes have automated protocol tests, but have not yet been checked on the physical D100. The earlier **0.1.0 ERG-only release** remains available.
 
-## Deliberately a bridge
+## Just a bridge
 
-- Relays ERG targets within the trainer's reported range, capped at **600 W**. Out-of-range requests are rejected. A zero target asks the trainer to stop.
-- Returns the trainer's measured power and speed. Cadence is forwarded only when present in FTMS data; the tested D100 did not provide it.
-- Shows Bluetooth connection, ANT broadcasting, and received cycling-computer signals separately. Receiving a signal is not a persistent Garmin connection check.
-- Does **not** implement slope, resistance, calibration, workout loading, recording, or PowerMatch. An external crank meter connected to the Edge remains independent; the trainer regulates ERG using its own measurement.
+The window shows the active target, trainer power, speed, and cadence when the trainer provides it. Crank power and cadence paired directly to your cycling computer remain separate. There is no PowerMatch, calibration, activity recording, or workout loading.
 
-**Stop** asks the trainer to stop and releases both connections. If Bluetooth has already disconnected, delivery of the stop command cannot be guaranteed. Hardware errors require restarting the bridge. Do not run two copies against one dongle.
+Power targets are capped at **600 W**. Slope follows the requested grade; the trainer determines how much resistance it can physically produce. Resistance percentages are mapped across the trainer's advertised levels, rather than treated as watts. [More about the modes](docs/guide.md#control-modes).
 
-## Run from source
+Click **Stop** before unplugging anything. If a connection is already lost, the app may not be able to deliver the stop command.
 
-Install Python **3.13 x64** on Windows, then:
+---
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe bridge.py
-```
+**Need help?** [Read the guide](docs/guide.md), or [open an issue](https://github.com/eliseobao/trainer-relay/issues/new/choose) with the error and a redacted log.
 
-[Development and architecture](docs/development.md) · [Build a release](docs/releasing.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+**Want to build it?** [Development & releases](docs/development.md) · [Contributing](CONTRIBUTING.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
-## Diagnostics
-
-Click **Open logs**. Logs are stored under `%LOCALAPPDATA%\TrainerBridge\bridge.log`; the legacy folder name is retained for existing installations. **Copy error** copies the displayed error and app version. Logs can include Bluetooth device names and addresses; redact them before posting an issue.
-
-Source-only commands:
-
-```powershell
-.\.venv\Scripts\python.exe bridge.py --version
-.\.venv\Scripts\python.exe bridge.py --scan
-.\.venv\Scripts\python.exe bridge.py --ant-test
-.\.venv\Scripts\python.exe bridge.py --preview
-```
-
-`--ant-test` temporarily broadcasts a trainer without connecting Bluetooth, then closes the channel. `--preview` shows explicitly labelled sample UI data and never accesses hardware.
-
-## Future control modes
-
-Slope and resistance are not implemented in v0.1.0, but the priority trainer advertises relevant FTMS capabilities. See the [feasibility research](docs/control-modes-research.md) for evidence, proposed translations, and unverified points.
-
-## Project status
-
-Early release, **v0.1.0**. On the tested setup, the Edge paired and sent a 325 W target; the D100 acknowledged the target and start command, and the rider confirmed ERG operation. The USB lifecycle also passed three consecutive 15-second sessions (180 transmissions total) without physical reconnection. Automated tests cover wire formats, FTMS commands, connection recovery, UI states, and USB ownership. These checks do not certify other hardware.
-
-## Related projects and references
-
-[FortiusANT](https://github.com/WouterJD/FortiusANT) bridges older Tacx trainers and documents ANT setup in detail. [SmartTrainer UI](https://github.com/krishardy/smarttrainerui) demonstrates a focused BLE control interface with background I/O. [Open Ride](https://github.com/baktakt/open-ride-app) illustrates clear separation between transport selection and trainer control. TrainerRelay takes the narrower Bluetooth-trainer-to-ANT-computer direction. See [design notes](docs/related-projects.md).
-
-Protocol references: [Bluetooth SIG FTMS](https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/), [Garmin trainer communication](https://developer.garmin.com/tacx-trainer/), and [Edge 530 pairing instructions](https://www8.garmin.com/manuals/webhelp/edge530/EN-GB/GUID-4A11E0FF-E539-412E-B959-1E709CFF63A3.html).
-
-MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Not affiliated with Garmin, Decathlon, Magene, or the related projects.
+MIT © eliseobao. Not affiliated with the device manufacturers.

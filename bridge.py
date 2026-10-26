@@ -169,12 +169,46 @@ async def scan():
     return result
 
 
+class FtmsRejected(RuntimeError):
+    def __init__(self, opcode, result):
+        self.opcode, self.result = opcode, result
+        names = {
+            0: "control request",
+            4: "resistance",
+            5: "power target",
+            7: "start",
+            8: "stop",
+            17: "slope",
+        }
+        reasons = {
+            2: "not supported",
+            3: "invalid parameter",
+            4: "operation failed",
+            5: "control not permitted",
+        }
+        super().__init__(
+            f"Trainer rejected {names.get(opcode, f'command {opcode:02x}')}: {reasons.get(result, f'result {result}')}"
+        )
+
+
 class Ftms:
     def __init__(self, client, state):
         self.client, self.state = client, state
         self.waiter = None
         self.lock = asyncio.Lock()
         self.minimum, self.maximum, self.increment = 0, MAX_POWER, 1
+        self.features = 8
+        self.resistance_range = None
+        self.resistance_format = "h"
+        self.simulation_parameters = (
+            0.0,
+            0.0,
+            0.004,
+            0.51,
+            1.0,
+        )  # wind, grade, rolling, drag, drafting
+        self.mode = None
+        self.controlled = False
 
     def indication(self, _, data):
         log.info("FTMS response %s", bytes(data).hex())
@@ -196,7 +230,7 @@ class Ftms:
                 await self.client.write_gatt_char(CONTROL, bytes([opcode]) + payload, response=True)
                 result = await asyncio.wait_for(future, 5)
                 if result != 1:
-                    raise RuntimeError(f"FTMS command {opcode:02x} rejected (result {result})")
+                    raise FtmsRejected(opcode, result)
             finally:
                 self.waiter = None
 
@@ -205,18 +239,40 @@ class Ftms:
             if not self.client.services.get_characteristic(characteristic):
                 raise RuntimeError(f"Trainer missing required FTMS characteristic {characteristic}")
         features = await self.client.read_gatt_char(FEATURE)
-        if len(features) < 8 or not struct.unpack_from("<I", features, 4)[0] & 8:
-            raise RuntimeError("Trainer does not advertise FTMS target power (ERG) support")
-        if self.client.services.get_characteristic(RANGE):
+        if len(features) != 8:
+            raise RuntimeError("Trainer returned invalid FTMS feature data")
+        self.features = struct.unpack_from("<I", features, 4)[0]
+        if self.features & 8 and self.client.services.get_characteristic(RANGE):
             self.minimum, self.maximum, self.increment = struct.unpack(
                 "<hhH", await self.client.read_gatt_char(RANGE)
             )
             self.minimum = max(0, self.minimum)
             self.maximum = min(MAX_POWER, self.maximum)
             self.increment = max(1, self.increment)
+            if self.maximum < self.minimum:
+                raise RuntimeError("Trainer returned an invalid power range")
+        resistance_characteristic = uuid("2ad6")
+        if self.features & 4 and self.client.services.get_characteristic(resistance_characteristic):
+            low, high, step = struct.unpack(
+                "<hhH", await self.client.read_gatt_char(resistance_characteristic)
+            )
+            if low < high and step > 0:
+                self.resistance_range = (low, high, step)
+            else:
+                log.warning("Invalid resistance range: resistance mode disabled")
+        if not self.fec_capabilities:
+            raise RuntimeError(
+                "Trainer exposes no usable power, resistance, or simulation controls"
+            )
+        log.info(
+            "FTMS features %s; resistance range (raw tenths) %s",
+            bytes(features).hex(),
+            self.resistance_range,
+        )
         await self.client.start_notify(CONTROL, self.indication)
         await self.client.start_notify(BIKE, self.notification)
         await self.command(0)
+        self.controlled = True
         log.info(
             "FTMS control acquired. Power range %s..%s W, step %s W",
             self.minimum,
@@ -224,9 +280,115 @@ class Ftms:
             self.increment,
         )
 
+    @property
+    def fec_capabilities(self):
+        return (
+            (2 if self.features & 8 else 0)
+            | (1 if self.features & 4 and self.resistance_range else 0)
+            | (4 if self.features & (1 << 13) else 0)
+        )
+
+    @property
+    def description(self):
+        modes = []
+        if self.fec_capabilities & 2:
+            modes.append(f"ERG {self.minimum}–{self.maximum} W")
+        if self.fec_capabilities & 1:
+            modes.append("Resistance")
+        if self.fec_capabilities & 4:
+            modes.append("Slope")
+        return " · ".join(modes)
+
+    async def apply(self, request):
+        if request.mode == "erg":
+            return await self.target(request.value), "ERG", "W"
+        if request.mode == "resistance":
+            return await self.resistance(request.value), "Resistance", "%"
+        if request.mode == "simulation":
+            return await self.simulate(request), "Slope", "%"
+        raise NotImplementedError(f"Unknown trainer mode: {request.mode}")
+
+    async def start_control(self):
+        try:
+            await self.command(7)
+        except FtmsRejected as exc:
+            # The target write may already have changed the brake. Stop this session
+            # rather than keep controlling a trainer that could not start its mode.
+            raise RuntimeError(
+                "Trainer could not start the control mode. Stop and reconnect."
+            ) from exc
+
+    async def resistance(self, percent):
+        if not self.fec_capabilities & 1:
+            raise NotImplementedError("Trainer does not expose a usable resistance range")
+        if not 0 <= percent <= 100:
+            raise ValueError("Resistance must be between 0 and 100%")
+        low, high, step = self.resistance_range
+        raw = low + round((high - low) * percent / 100 / step) * step
+        raw = max(low, min(low + ((high - low) // step) * step, raw))
+        if self.resistance_format == "B" and not 0 <= raw <= 255:
+            raise ValueError("Resistance exceeds the trainer's legacy one-byte format")
+        try:
+            await self.command(4, struct.pack("<" + self.resistance_format, raw))
+        except FtmsRejected as exc:
+            # Old FTMS 1.0 implementations accept UINT8 rather than corrected SINT16.
+            # Retry only a parameter rejection, within the advertised range, before start.
+            if self.resistance_format != "h" or exc.result != 3 or not 0 <= raw <= 255:
+                raise
+            await self.command(4, bytes([raw]))
+            self.resistance_format = "B"
+            log.info("Trainer accepted legacy UINT8 resistance format")
+        await self.start_control()
+        self.mode = "resistance"
+        accepted = (raw - low) / (high - low) * 100
+        log.info("Resistance accepted: %.1f%% (native %.1f)", accepted, raw / 10)
+        return round(accepted, 1)
+
+    async def simulate(self, request):
+        if not self.fec_capabilities & 4:
+            raise NotImplementedError("Trainer does not advertise indoor-bike simulation")
+        wind, grade, rolling, drag, drafting = self.simulation_parameters
+        if request.wind is not None:
+            wind, drag, drafting = request.wind
+        if request.value is not None:
+            grade = request.value
+        if request.rolling is not None:
+            rolling = request.rolling
+        speed_raw, grade_raw = round(wind * 1000), round(grade * 100)
+        rolling_raw, drag_raw = round(rolling * 10000), round(drag * drafting * 100)
+        if not (
+            -32768 <= speed_raw <= 32767
+            and -32768 <= grade_raw <= 32767
+            and 0 <= rolling_raw <= 255
+            and 0 <= drag_raw <= 255
+        ):
+            raise ValueError("Simulation parameters exceed the Bluetooth FTMS encoding range")
+        if self.mode != "simulation" and (request.page == 50 or request.value is None):
+            # Road settings configure simulation; only a valid grade selects that mode.
+            # Sending FTMS 0x11 here would unexpectedly end ERG or basic resistance.
+            self.simulation_parameters = (wind, grade, rolling, drag, drafting)
+            log.info("Road settings saved for the next slope target")
+            return None
+        await self.command(0x11, struct.pack("<hhBB", speed_raw, grade_raw, rolling_raw, drag_raw))
+        await self.start_control()
+        self.simulation_parameters = (wind, grade, rolling, drag, drafting)
+        self.mode = "simulation"
+        log.info(
+            "Slope accepted: %.2f%%; wind %.3f m/s, rolling %.5f, drag %.2f, drafting %.2f",
+            grade,
+            wind,
+            rolling,
+            drag,
+            drafting,
+        )
+        return round(grade, 2)
+
     async def target(self, watts):
+        if not self.features & 8:
+            raise NotImplementedError("Trainer does not advertise ERG support")
         if watts == 0:
             await self.command(8, b"\x01")
+            self.mode = None
             log.info("Cycling computer requested zero power: trainer stopped")
             return 0
         if not self.minimum <= watts <= self.maximum:
@@ -234,9 +396,11 @@ class Ftms:
                 f"Target {watts:g} W outside supported {self.minimum}..{self.maximum} W"
             )
         watts = self.minimum + round((watts - self.minimum) / self.increment) * self.increment
-        watts = min(self.maximum, watts)
+        ceiling = self.minimum + ((self.maximum - self.minimum) // self.increment) * self.increment
+        watts = min(ceiling, watts)
         await self.command(5, struct.pack("<h", watts))
-        await self.command(7)
+        await self.start_control()
+        self.mode = "erg"
         log.info("ERG target accepted by trainer: %s W", watts)
         return watts
 
@@ -296,32 +460,41 @@ async def run_bridge(address, stop, report, device_id=TRAINER_ID):
         ftms = Ftms(client, state)
         try:
             await ftms.initialize()
+            fec.capabilities = ftms.fec_capabilities
             report(("link", "bluetooth", "Connected"))
             report(("link", "ant", "Opening"))
             ant = await AntSession().open(device_id)
             await ant.broadcast(fec.next_page(state))
             report(("link", "ant", "Broadcasting"))
-            report(("ready", device_id, ftms.minimum, ftms.maximum))
+            report(("ready", device_id, ftms.description))
             commands = asyncio.Queue(maxsize=32)
 
             async def control_worker():
-                while True:
-                    watts, sequence = await commands.get()
+                while not stop.is_set():
+                    request, sequence = await commands.get()
                     try:
-                        accepted = await ftms.target(watts)
+                        accepted, mode, unit = await ftms.apply(request)
                         if fec.sequence == sequence:
                             fec.result(0)
-                        report(("target", accepted))
-                    except ValueError as exc:
+                        if accepted is None:
+                            report(("settings", "Road settings saved for the next slope target."))
+                        else:
+                            report(("target", accepted, mode, unit))
+                    except (ValueError, NotImplementedError, FtmsRejected) as exc:
+                        if isinstance(exc, NotImplementedError):
+                            status = 2
+                        elif isinstance(exc, FtmsRejected):
+                            status = {2: 2, 3: 3}.get(exc.result, 1)
+                        else:
+                            status = 3
                         if fec.sequence == sequence:
-                            fec.result(3)
-                        report(str(exc))
-                        log.warning("%s", exc)
-                    except Exception as exc:
+                            fec.result(status)
+                        report(("command_error", str(exc)))
+                        log.warning("Control rejected: %s", exc)
+                    except Exception:
                         if fec.sequence == sequence:
                             fec.result(1)
-                        report(f"ERG failed: {exc}")
-                        log.exception("ERG command failed")
+                        log.exception("Trainer control failed")
                         raise
 
             worker = asyncio.create_task(control_worker())
@@ -343,16 +516,41 @@ async def run_bridge(address, stop, report, device_id=TRAINER_ID):
                         elif mid in (0x4E, 0x4F) and len(payload) >= 9 and payload[0] & 31 == 0:
                             report(("link", "computer", "Signal received"))
                             log.info("ANT RX %s", payload[1:9].hex())
-                            watts = fec.receive(payload[1:9])
-                            if watts is not None:
+                            previous_sequence = fec.sequence
+                            request = fec.receive(payload[1:9])
+                            if (
+                                request is None
+                                and fec.sequence != previous_sequence
+                                and payload[1] in (48, 49, 50, 51)
+                            ):
+                                mode = {
+                                    48: "resistance",
+                                    49: "ERG",
+                                    50: "slope",
+                                    51: "slope",
+                                    55: "user configuration",
+                                }.get(payload[1], "control")
+                                reason = (
+                                    "not supported by this connection"
+                                    if fec.status[3] == 2
+                                    else "invalid parameters"
+                                )
+                                report(("command_error", f"{mode.capitalize()} request: {reason}"))
+                            if request is not None:
                                 # Sequence numbers keep status associated with the latest cycling-computer target.
                                 if worker.done():
                                     await worker
                                 if fec.status[3] == 4:
                                     try:
-                                        commands.put_nowait((watts, fec.sequence))
+                                        commands.put_nowait((request, fec.sequence))
                                     except asyncio.QueueFull:
                                         fec.result(1)
+                                        report(
+                                            (
+                                                "command_error",
+                                                "Trainer is busy. Try the target again shortly.",
+                                            )
+                                        )
                     if time.monotonic() - last_report > 1:
                         report(
                             (
@@ -369,7 +567,7 @@ async def run_bridge(address, stop, report, device_id=TRAINER_ID):
                 await asyncio.gather(worker, return_exceptions=True)
         finally:
             try:
-                if client.is_connected:
+                if client.is_connected and ftms.controlled:
                     await ftms.command(8, b"\x01")
             except Exception:
                 log.exception("Trainer stop failed")
