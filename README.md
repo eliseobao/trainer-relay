@@ -70,6 +70,10 @@ Source-only commands:
 
 `--ant-test` temporarily broadcasts a trainer without connecting Bluetooth, then closes the channel. `--preview` shows explicitly labelled sample UI data and never accesses hardware.
 
+## Future control modes
+
+Slope and resistance are not implemented in v0.1.0, but the priority trainer advertises relevant FTMS capabilities. See the [feasibility research](docs/control-modes-research.md) for evidence, proposed translations, and unverified points.
+
 ## Project status
 
 Early release, **v0.1.0**. On the tested setup, the Edge paired and sent a 325 W target; the D100 acknowledged the target and start command, and the rider confirmed ERG operation. The USB lifecycle also passed three consecutive 15-second sessions (180 transmissions total) without physical reconnection. Automated tests cover wire formats, FTMS commands, connection recovery, UI states, and USB ownership. These checks do not certify other hardware.
