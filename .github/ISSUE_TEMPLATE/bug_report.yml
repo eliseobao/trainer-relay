@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a connection or bridge problem
+body:
+  - type: input
+    id: version
+    attributes:
+      label: TrainerRelay version and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Trainer, cycling computer, ANT USB ID and driver
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce and expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error and redacted log excerpt
+      description: Remove Bluetooth addresses, device names, and other personal details.
+      render: text
